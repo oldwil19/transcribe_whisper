@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  transcriber:
+    build: ./python_service
+    container_name: whisper_service
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./downloads:/app/downloads
+    ports:
+      - "8000:8000"
+
+  api:
+    build: ./golang_api
+    container_name: golang_api
+    depends_on:
+      - transcriber
+    ports:
+      - "8080:8080"
