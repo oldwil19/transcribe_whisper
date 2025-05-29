@@ -6,12 +6,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/pkg/errors"
 )
 
 // Estructura del estado del job
@@ -112,27 +114,78 @@ func processJob(jobID string, input RequestBody) {
 	jobStore[jobID].Status = "processing"
 	mu.Unlock()
 
+	// Validar URL
+	parsedURL, err := url.Parse(input.URL)
+	if err != nil {
+		mu.Lock()
+		jobStore[jobID].Status = "failed"
+		jobStore[jobID].Error = errors.Wrap(err, "invalid URL format").Error()
+		mu.Unlock()
+		return
+	}
+
+	if parsedURL.Scheme != "https" && parsedURL.Scheme != "http" {
+		mu.Lock()
+		jobStore[jobID].Status = "failed"
+		jobStore[jobID].Error = "URL must use http or https scheme"
+		mu.Unlock()
+		return
+	}
+
+	if parsedURL.Host == "" {
+		mu.Lock()
+		jobStore[jobID].Status = "failed"
+		jobStore[jobID].Error = "URL must have a valid host"
+		mu.Unlock()
+		return
+	}
+
 	payload := PythonRequest{
 		URL:       input.URL,
 		Language:  input.Language,
 		Translate: input.Translate,
 	}
-	jsonData, _ := json.Marshal(payload)
-
-	resp, err := http.Post("http://whisper_service:8000/transcribe", "application/json", bytes.NewBuffer(jsonData))
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		mu.Lock()
 		jobStore[jobID].Status = "failed"
-		jobStore[jobID].Error = err.Error()
+		jobStore[jobID].Error = errors.Wrap(err, "failed to marshal JSON payload").Error()
+		mu.Unlock()
+		return
+	}
+
+	// Configurar cliente HTTP con timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	resp, err := client.Post("http://whisper_service:8000/transcribe", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		mu.Lock()
+		jobStore[jobID].Status = "failed"
+		jobStore[jobID].Error = errors.Wrap(err, "failed to connect to whisper service").Error()
 		mu.Unlock()
 		return
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		mu.Lock()
+		jobStore[jobID].Status = "failed"
+		jobStore[jobID].Error = errors.Wrap(err, "failed to read response body").Error()
+		mu.Unlock()
+		return
+	}
 
 	var result map[string]string
-	json.Unmarshal(body, &result)
+	if err := json.Unmarshal(body, &result); err != nil {
+		mu.Lock()
+		jobStore[jobID].Status = "failed"
+		jobStore[jobID].Error = errors.Wrap(err, "failed to parse JSON response").Error()
+		mu.Unlock()
+		return
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
